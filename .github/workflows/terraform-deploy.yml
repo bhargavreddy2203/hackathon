@@ -1,19 +1,27 @@
-name: Terraform Infrastructure - UAT
+name: Terraform Deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
 
 env:
   AWS_REGION: us-east-1
   PROJECT_NAME: microservices
   ECR_REPOS: patient-service,application-service,order-service
-  ENVIRONMENT: uat
 
 jobs:
   terraform:
-    name: Terraform Deploy - UAT
+    name: Terraform Deploy - ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
-    environment: uat
+    environment: ${{ github.event.inputs.environment }}
     permissions:
       contents: read
       id-token: write
@@ -26,15 +34,14 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_BOOTSTRAP_ROLE_ARN }}
-          role-session-name: GitHubActions-Terraform-UAT-${{ github.run_id }}
+          role-session-name: GitHubActions-Terraform-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Retrieve Secrets from AWS Secrets Manager
-        id: secrets
         run: |
-          SECRET_NAME="github-actions/${{ env.ENVIRONMENT }}/aws-credentials"
+          SECRET_NAME="github-actions/${{ github.event.inputs.environment }}/aws-credentials"
           
-          echo "Retrieving secrets from AWS Secrets Manager: $SECRET_NAME"
+          echo "Retrieving secrets for ${{ github.event.inputs.environment }} environment"
           SECRET_JSON=$(aws secretsmanager get-secret-value \
             --secret-id "$SECRET_NAME" \
             --region ${{ env.AWS_REGION }} \
@@ -49,8 +56,6 @@ jobs:
           
           echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
           echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          
-          echo "Successfully retrieved credentials from Secrets Manager"
 
       - name: Configure AWS Credentials (Main)
         uses: aws-actions/configure-aws-credentials@v4
@@ -76,12 +81,11 @@ jobs:
         run: chmod +x scripts/*.sh
 
       - name: Run CI/CD Pipeline
-        id: pipeline
         run: |
           cd scripts
           ./cicd-pipeline.sh \
             "deploy" \
-            "${{ env.ENVIRONMENT }}" \
+            "${{ github.event.inputs.environment }}" \
             "${{ env.PROJECT_NAME }}" \
             "${{ env.AWS_REGION }}" \
             "${{ env.ECR_REPOS }}"
@@ -90,7 +94,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-deploy-uat-${{ github.run_number }}
+          name: terraform-deploy-${{ github.event.inputs.environment }}-${{ github.run_number }}
           path: |
             terraform/tfplan
             terraform/plan-output.txt
@@ -99,15 +103,14 @@ jobs:
             terraform/ecr_repos.json
             terraform/deployment-summary.md
             terraform/deployment-info.txt
-          retention-days: 30
+          retention-days: ${{ github.event.inputs.environment == 'prod' && 90 || 30 }}
 
       - name: Create Job Summary
         if: always()
         run: |
-          echo "## Terraform Deploy - UAT" >> $GITHUB_STEP_SUMMARY
+          echo "## Terraform Deploy - ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** \`uat\`" >> $GITHUB_STEP_SUMMARY
-          echo "**Action:** \`deploy\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Region:** \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY

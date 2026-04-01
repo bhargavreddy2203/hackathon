@@ -9,11 +9,14 @@ terraform {
   }
 
   backend "s3" {
-    bucket         = "microservices-terraform-state-bucket-12345"
-    key            = "microservices/terraform.tfstate"
-    region         = "us-east-1"
-    encrypt        = true
-    dynamodb_table = "microservices-terraform-state-lock"
+    # Backend configuration will be provided via -backend-config flags
+    # or backend config files during terraform init
+    # Format:
+    #   - Bucket: microservices-terraform-state-bucket-{env}
+    #   - DynamoDB: microservices-terraform-state-lock-{env}
+    key     = "microservices/terraform.tfstate"
+    region  = "us-east-1"
+    encrypt = true
   }
 }
 

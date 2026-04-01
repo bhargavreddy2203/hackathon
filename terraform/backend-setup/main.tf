@@ -19,10 +19,10 @@ provider "aws" {
 
 # S3 Bucket for Terraform State
 resource "aws_s3_bucket" "terraform_state" {
-  bucket = var.state_bucket_name
+  bucket = var.state_bucket_suffix != "" ? "${var.state_bucket_name}-${var.state_bucket_suffix}" : var.state_bucket_name
 
   tags = {
-    Name        = var.state_bucket_name
+    Name        = var.state_bucket_suffix != "" ? "${var.state_bucket_name}-${var.state_bucket_suffix}" : var.state_bucket_name
     Environment = var.environment
     Purpose     = "Terraform State Storage"
     ManagedBy   = "Terraform"
@@ -75,7 +75,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "terraform_state" {
 
 # DynamoDB Table for State Locking
 resource "aws_dynamodb_table" "terraform_locks" {
-  name         = var.dynamodb_table_name
+  name         = var.dynamodb_table_suffix != "" ? "${var.dynamodb_table_name}-${var.dynamodb_table_suffix}" : var.dynamodb_table_name
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "LockID"
 
@@ -85,7 +85,7 @@ resource "aws_dynamodb_table" "terraform_locks" {
   }
 
   tags = {
-    Name        = var.dynamodb_table_name
+    Name        = var.dynamodb_table_suffix != "" ? "${var.dynamodb_table_name}-${var.dynamodb_table_suffix}" : var.dynamodb_table_name
     Environment = var.environment
     Purpose     = "Terraform State Locking"
     ManagedBy   = "Terraform"

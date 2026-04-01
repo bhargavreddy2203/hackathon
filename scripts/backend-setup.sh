@@ -44,9 +44,9 @@ ENVIRONMENT="${TF_VAR_environment:-${1:-dev}}"
 PROJECT_NAME="${TF_VAR_project_name:-${2:-microservices}}"
 AWS_REGION="${TF_VAR_aws_region:-${3:-us-east-1}}"
 
-# Generate bucket name if not provided
-BUCKET_NAME="${TF_VAR_state_bucket_name:-${PROJECT_NAME}-${ENVIRONMENT}-terraform-state-$(date +%s)}"
-DYNAMODB_TABLE="${TF_VAR_dynamodb_table_name:-${PROJECT_NAME}-${ENVIRONMENT}-terraform-lock}"
+# Generate bucket name and DynamoDB table with environment-specific pattern
+BUCKET_NAME="${TF_VAR_state_bucket_name:-microservices-terraform-state-bucket-${ENVIRONMENT}}"
+DYNAMODB_TABLE="${TF_VAR_dynamodb_table_name:-microservices-terraform-state-lock-${ENVIRONMENT}}"
 
 print_header "Terraform Backend Setup"
 echo ""
@@ -92,8 +92,10 @@ cat > terraform.tfvars << EOF
 
 aws_region = "$AWS_REGION"
 environment = "$ENVIRONMENT"
-state_bucket_name = "$BUCKET_NAME"
-dynamodb_table_name = "$DYNAMODB_TABLE"
+state_bucket_name = "microservices-terraform-state-bucket"
+state_bucket_suffix = "$ENVIRONMENT"
+dynamodb_table_name = "microservices-terraform-state-lock"
+dynamodb_table_suffix = "$ENVIRONMENT"
 EOF
 
 print_success "Configuration file created"

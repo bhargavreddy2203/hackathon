@@ -87,8 +87,16 @@ echo ""
 print_header "Step 3: Terraform Plan"
 cd "$SCRIPT_DIR/../terraform"
 
-print_info "Initializing Terraform..."
-terraform init -input=false
+print_info "Initializing Terraform with environment-specific backend..."
+BACKEND_CONFIG_FILE="backend-${ENVIRONMENT}.hcl"
+
+if [ -f "$BACKEND_CONFIG_FILE" ]; then
+    print_info "Using backend config: $BACKEND_CONFIG_FILE"
+    terraform init -input=false -backend-config="$BACKEND_CONFIG_FILE" -reconfigure
+else
+    print_error "Backend config file not found: $BACKEND_CONFIG_FILE"
+    exit 1
+fi
 
 print_info "Validating configuration..."
 terraform validate

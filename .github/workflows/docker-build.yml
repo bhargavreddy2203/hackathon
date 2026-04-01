@@ -1,32 +1,30 @@
-name: Docker Build - UAT
+name: Docker Build and Push
 
 on:
-  push:
-    branches:
-      - uat
-    paths:
-      - 'patient-service/**'
-      - 'application-service/**'
-      - 'order-service/**'
-      - '.github/workflows/docker-build-uat.yml'
-  
   workflow_dispatch:
     inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
       git_tag:
-        description: 'Git release tag (e.g., v1.0.0-rc1)'
+        description: 'Git tag (optional for dev, required for uat/prod)'
         required: false
         type: string
 
 env:
   AWS_REGION: us-east-1
   PROJECT_NAME: microservices
-  ENVIRONMENT: uat
 
 jobs:
   build-and-push:
-    name: Build and Push to UAT
+    name: Build and Push - ${{ github.event.inputs.environment }}
     runs-on: ubuntu-latest
-    environment: uat
+    environment: ${{ github.event.inputs.environment }}
     permissions:
       contents: read
       id-token: write
@@ -50,44 +48,47 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine Git Tag
-        id: tag
+      - name: Validate Git Tag
+        if: github.event.inputs.environment != 'dev' && github.event.inputs.git_tag == ''
         run: |
-          if [ -n "${{ github.event.inputs.git_tag }}" ]; then
-            GIT_TAG="${{ github.event.inputs.git_tag }}"
-          else
-            # Use latest tag or commit SHA
-            GIT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "uat-$(git rev-parse --short HEAD)")
+          echo "Error: Git tag is required for ${{ github.event.inputs.environment }} environment"
+          exit 1
+
+      - name: Checkout Git Tag
+        if: github.event.inputs.git_tag != ''
+        run: |
+          if ! git rev-parse "${{ github.event.inputs.git_tag }}" >/dev/null 2>&1; then
+            echo "Error: Git tag ${{ github.event.inputs.git_tag }} does not exist"
+            exit 1
           fi
-          echo "git_tag=$GIT_TAG" >> $GITHUB_OUTPUT
-          echo "Using tag: $GIT_TAG"
+          git checkout "${{ github.event.inputs.git_tag }}"
+          echo "Checked out tag: ${{ github.event.inputs.git_tag }}"
 
       - name: Configure AWS Credentials (Bootstrap)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_BOOTSTRAP_ROLE_ARN }}
-          role-session-name: GitHubActions-Docker-UAT-${{ github.run_id }}
+          role-session-name: GitHubActions-Docker-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Make Scripts Executable
         run: chmod +x scripts/*.sh
 
       - name: AWS Authentication and ECR Login
-        id: aws-ecr
         run: |
-          ./scripts/aws-ecr-login.sh "${{ env.ENVIRONMENT }}" "${{ env.AWS_REGION }}"
+          ./scripts/aws-ecr-login.sh "${{ github.event.inputs.environment }}" "${{ env.AWS_REGION }}"
 
       - name: Get ECR Repository URI
         id: ecr-uri
         run: |
           REPO_URI=$(aws ecr describe-repositories \
-            --repository-names ${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${{ matrix.service.name }} \
+            --repository-names ${{ env.PROJECT_NAME }}-${{ github.event.inputs.environment }}-${{ matrix.service.name }} \
             --region ${{ env.AWS_REGION }} \
             --query 'repositories[0].repositoryUri' \
             --output text 2>/dev/null || echo "")
           
           if [ -z "$REPO_URI" ]; then
-            echo "Error: ECR repository not found for ${{ matrix.service.name }} in ${{ env.ENVIRONMENT }}"
+            echo "Error: ECR repository not found for ${{ matrix.service.name }} in ${{ github.event.inputs.environment }}"
             exit 1
           fi
           
@@ -103,9 +104,10 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
           
-          # Clean git tag (remove 'v' prefix if present)
-          CLEAN_TAG=$(echo "${{ steps.tag.outputs.git_tag }}" | sed 's/^v//')
-          echo "clean_tag=$CLEAN_TAG" >> $GITHUB_OUTPUT
+          if [ -n "${{ github.event.inputs.git_tag }}" ]; then
+            CLEAN_TAG=$(echo "${{ github.event.inputs.git_tag }}" | sed 's/^v//')
+            echo "clean_tag=$CLEAN_TAG" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -117,10 +119,9 @@ jobs:
           file: ${{ matrix.service.dockerfile }}
           push: true
           tags: |
-            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ steps.tag.outputs.git_tag }}
-            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ steps.meta.outputs.clean_tag }}
-            ${{ steps.ecr-uri.outputs.repository_uri }}:uat-latest
-            ${{ steps.ecr-uri.outputs.repository_uri }}:uat-${{ steps.meta.outputs.timestamp }}
+            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ github.event.inputs.git_tag || 'latest' }}
+            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ steps.meta.outputs.short_sha }}
+            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ github.event.inputs.environment }}-${{ steps.meta.outputs.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
@@ -128,29 +129,24 @@ jobs:
       - name: Image Scan
         run: |
           sleep 10
+          TAG="${{ github.event.inputs.git_tag || 'latest' }}"
           aws ecr start-image-scan \
-            --repository-name ${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${{ matrix.service.name }} \
-            --image-id imageTag=${{ steps.tag.outputs.git_tag }} \
+            --repository-name ${{ env.PROJECT_NAME }}-${{ github.event.inputs.environment }}-${{ matrix.service.name }} \
+            --image-id imageTag=$TAG \
             --region ${{ env.AWS_REGION }} || echo "Scan already in progress or not supported"
 
       - name: Output Image Details
         run: |
-          echo "## 🐳 Docker Image Published - UAT" >> $GITHUB_STEP_SUMMARY
+          echo "## 🐳 Docker Image Published" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Service:** ${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** UAT" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
           echo "**Repository:** ${{ steps.ecr-uri.outputs.repository_uri }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ steps.tag.outputs.git_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`${{ steps.meta.outputs.clean_tag }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`uat-latest\`" >> $GITHUB_STEP_SUMMARY
-          echo "- \`uat-${{ steps.meta.outputs.timestamp }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Pull Command:**" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-          echo "docker pull ${{ steps.ecr-uri.outputs.repository_uri }}:${{ steps.tag.outputs.git_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ github.event.inputs.git_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ github.event.inputs.environment }}-${{ steps.meta.outputs.timestamp }}\`" >> $GITHUB_STEP_SUMMARY
 
   summary:
     name: Deployment Summary
@@ -160,10 +156,8 @@ jobs:
     steps:
       - name: Create Summary
         run: |
-          echo "## 📦 Docker Build Complete - UAT" >> $GITHUB_STEP_SUMMARY
+          echo "## 📦 Docker Build Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment:** \`uat\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ github.event.inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Git Tag:** \`${{ github.event.inputs.git_tag || 'latest' }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "All microservice images have been built and pushed to ECR UAT repositories." >> $GITHUB_STEP_SUMMARY
