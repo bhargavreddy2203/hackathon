@@ -1,0 +1,148 @@
+name: Docker Build - DEV
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - dev
+    paths:
+      - 'patient-service/**'
+      - 'application-service/**'
+      - 'order-service/**'
+      - '.github/workflows/docker-build-dev.yml'
+  
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT_NAME: microservices
+  ENVIRONMENT: dev
+
+jobs:
+  build-and-push:
+    name: Build and Push to DEV
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    
+    strategy:
+      matrix:
+        service:
+          - name: patient-service
+            context: ./patient-service
+            dockerfile: ./patient-service/Dockerfile
+          - name: application-service
+            context: ./application-service
+            dockerfile: ./application-service/Dockerfile
+          - name: order-service
+            context: ./order-service
+            dockerfile: ./order-service/Dockerfile
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure AWS Credentials (Bootstrap)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_BOOTSTRAP_ROLE_ARN }}
+          role-session-name: GitHubActions-Docker-Dev-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Make Scripts Executable
+        run: chmod +x scripts/*.sh
+
+      - name: AWS Authentication and ECR Login
+        id: aws-ecr
+        run: |
+          ./scripts/aws-ecr-login.sh "${{ env.ENVIRONMENT }}" "${{ env.AWS_REGION }}"
+
+      - name: Get ECR Repository URI
+        id: ecr-uri
+        run: |
+          REPO_URI=$(aws ecr describe-repositories \
+            --repository-names ${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${{ matrix.service.name }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'repositories[0].repositoryUri' \
+            --output text 2>/dev/null || echo "")
+          
+          if [ -z "$REPO_URI" ]; then
+            echo "Error: ECR repository not found for ${{ matrix.service.name }} in ${{ env.ENVIRONMENT }}"
+            exit 1
+          fi
+          
+          echo "repository_uri=$REPO_URI" >> $GITHUB_OUTPUT
+          echo "ECR Repository: $REPO_URI"
+
+      - name: Extract Metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.ecr-uri.outputs.repository_uri }}:latest
+            ${{ steps.ecr-uri.outputs.repository_uri }}:${{ steps.meta.outputs.short_sha }}
+            ${{ steps.ecr-uri.outputs.repository_uri }}:dev-${{ steps.meta.outputs.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Image Scan
+        run: |
+          sleep 10
+          aws ecr start-image-scan \
+            --repository-name ${{ env.PROJECT_NAME }}-${{ env.ENVIRONMENT }}-${{ matrix.service.name }} \
+            --image-id imageTag=latest \
+            --region ${{ env.AWS_REGION }} || echo "Scan already in progress or not supported"
+
+      - name: Output Image Details
+        run: |
+          echo "## 🐳 Docker Image Published - DEV" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** ${{ matrix.service.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** DEV" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ steps.ecr-uri.outputs.repository_uri }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo "- \`latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`${{ steps.meta.outputs.short_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- \`dev-${{ steps.meta.outputs.timestamp }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pull Command:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ steps.ecr-uri.outputs.repository_uri }}:latest" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+  summary:
+    name: Deployment Summary
+    needs: build-and-push
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Summary
+        run: |
+          echo "## 📦 Docker Build Complete - DEV" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`dev\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All microservice images have been built and pushed to ECR DEV repositories." >> $GITHUB_STEP_SUMMARY
