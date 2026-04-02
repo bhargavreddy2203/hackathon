@@ -15,7 +15,7 @@ cd scripts
 
 This creates:
 - S3 Bucket: `microservices-terraform-state-bucket-dev`
-- DynamoDB Table: `microservices-terraform-state-lock`
+- DynamoDB Table: `microservices-terraform-state-lock-dev`
 
 ### 2. Setup UAT Environment State Bucket
 
@@ -26,7 +26,7 @@ cd scripts
 
 This creates:
 - S3 Bucket: `microservices-terraform-state-bucket-uat`
-- Uses same DynamoDB Table: `microservices-terraform-state-lock`
+- DynamoDB Table: `microservices-terraform-state-lock-uat`
 
 ### 3. Setup Prod Environment State Bucket
 
@@ -37,7 +37,7 @@ cd scripts
 
 This creates:
 - S3 Bucket: `microservices-terraform-state-bucket-prod`
-- Uses same DynamoDB Table: `microservices-terraform-state-lock`
+- DynamoDB Table: `microservices-terraform-state-lock-prod`
 
 ## Via GitHub Actions
 
@@ -59,8 +59,16 @@ aws s3 ls | grep microservices-terraform-state-bucket
 # microservices-terraform-state-bucket-uat
 # microservices-terraform-state-bucket-prod
 
-# Check DynamoDB table
-aws dynamodb describe-table --table-name microservices-terraform-state-lock
+# Check DynamoDB tables
+aws dynamodb list-tables | grep microservices-terraform-state-lock
+
+# Expected output:
+# microservices-terraform-state-lock-dev
+# microservices-terraform-state-lock-uat
+# microservices-terraform-state-lock-prod
+
+# Describe a specific table
+aws dynamodb describe-table --table-name microservices-terraform-state-lock-dev
 ```
 
 ## What Happens Next?
@@ -81,9 +89,9 @@ Each bucket is automatically configured with:
 
 ## Important Notes
 
-⚠️ **One-Time Setup**: You only need to create each state bucket once  
-⚠️ **Order Matters**: Create state buckets BEFORE deploying infrastructure  
-⚠️ **Shared Lock Table**: All environments share the same DynamoDB lock table  
+⚠️ **One-Time Setup**: You only need to create each state bucket once
+⚠️ **Order Matters**: Create state buckets BEFORE deploying infrastructure
+⚠️ **Environment Isolation**: Each environment has its own S3 bucket AND DynamoDB lock table
 ⚠️ **Bucket Names**: Must be globally unique (default pattern handles this)
 
 ## Troubleshooting
@@ -103,8 +111,10 @@ Ensure your AWS credentials have permissions to:
 
 If Terraform operations timeout due to state lock:
 ```bash
-# Check for stuck locks
-aws dynamodb scan --table-name microservices-terraform-state-lock
+# Check for stuck locks in specific environment
+aws dynamodb scan --table-name microservices-terraform-state-lock-dev
+aws dynamodb scan --table-name microservices-terraform-state-lock-uat
+aws dynamodb scan --table-name microservices-terraform-state-lock-prod
 
 # Force unlock (use with caution!)
 terraform force-unlock <LOCK_ID>

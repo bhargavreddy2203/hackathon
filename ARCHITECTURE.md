@@ -19,6 +19,7 @@
 │  ┌────────────────────────────────────────────────────────────────────┐    │
 │  │                    Terraform Infrastructure                         │    │
 │  │  • VPC Configuration    • EKS Cluster    • ECR Repositories        │    │
+│  │  • Backend Config Files (backend-dev/uat/prod.hcl)                 │    │
 │  └────────────────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
@@ -27,41 +28,56 @@
 │                          GITHUB ACTIONS CI/CD                                │
 │                                                                               │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │  0. BACKEND SETUP (One-time per environment)                         │  │
+│  │     backend-setup.sh                                                 │  │
+│  │     ├─ Creates S3 State Bucket per environment                       │  │
+│  │     ├─ Creates DynamoDB Lock Table per environment                   │  │
+│  │     └─ Enables versioning, encryption, lifecycle policies            │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  1. TERRAFORM PLAN ON PR (Automatic)                                 │  │
 │  │     terraform-plan-pr.yml                                            │  │
 │  │     ├─ Triggers: PR to dev/uat/main                                  │  │
-│  │     ├─ Format Check                                                  │  │
-│  │     ├─ Validation                                                    │  │
+│  │     ├─ AWS Bootstrap Role (OIDC) → Secrets Manager                   │  │
+│  │     ├─ Retrieves environment-specific credentials                    │  │
+│  │     ├─ Terraform Init with backend-{env}.hcl                         │  │
+│  │     ├─ Format Check & Validation                                     │  │
 │  │     ├─ Plan Generation                                               │  │
-│  │     └─ PR Comment with Plan Output                                  │  │
+│  │     └─ PR Comment with Plan Output                                   │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                               │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  2. TERRAFORM DEPLOY (Manual)                                        │  │
 │  │     terraform-deploy.yml                                             │  │
 │  │     ├─ Input: Environment (dev/uat/prod)                             │  │
-│  │     ├─ AWS Authentication via Secrets Manager                        │  │
-│  │     ├─ Terraform Init                                                │  │
+│  │     ├─ AWS Bootstrap Role (OIDC) → Secrets Manager                   │  │
+│  │     ├─ Retrieves environment-specific credentials                    │  │
+│  │     ├─ Terraform Init with backend-{env}.hcl                         │  │
 │  │     ├─ Terraform Apply                                               │  │
-│  │     └─ Creates: VPC, EKS Cluster, ECR Repositories                  │  │
+│  │     ├─ State stored in S3: microservices-terraform-state-bucket-{env}│  │
+│  │     └─ Creates: VPC, EKS Cluster, ECR Repositories                   │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                               │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  3. DOCKER BUILD & PUSH (Manual)                                     │  │
 │  │     docker-build.yml                                                 │  │
 │  │     ├─ Input: Environment (dev/uat/prod), Git Tag                    │  │
-│  │     ├─ AWS Authentication via Secrets Manager                        │  │
+│  │     ├─ AWS Bootstrap Role (OIDC) → Secrets Manager                   │  │
+│  │     ├─ Retrieves environment-specific credentials                    │  │
 │  │     ├─ ECR Login                                                     │  │
-│  │     ├─ Build Docker Images (3 services)                              │  │
-│  │     ├─ Tag Images (git-tag, sha, timestamp)                          │  │
-│  │     └─ Push to ECR                                                   │  │
+│  │     ├─ Build Docker Images (3 services in parallel)                  │  │
+│  │     ├─ Tag Images (git-tag, sha, env-timestamp)                      │  │
+│  │     ├─ Push to ECR                                                   │  │
+│  │     └─ Image Security Scan                                           │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                               │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │  4. KUBERNETES DEPLOY/ROLLBACK (Manual)                              │  │
 │  │     k8s-deploy.yml                                                   │  │
 │  │     ├─ Input: Environment, Action (deploy/rollback), Image Tag       │  │
-│  │     ├─ AWS Authentication via Secrets Manager                        │  │
+│  │     ├─ AWS Bootstrap Role (OIDC) → Secrets Manager                   │  │
+│  │     ├─ Retrieves environment-specific credentials                    │  │
 │  │     ├─ Configure kubectl for EKS                                     │  │
 │  │     ├─ Read images.yaml                                              │  │
 │  │     ├─ Deploy: Process Manifests & Deploy ALL Services               │  │
@@ -76,10 +92,29 @@
 │                              AWS INFRASTRUCTURE                              │
 │                                                                               │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
+│  │                    TERRAFORM STATE MANAGEMENT                         │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │  │
+│  │  │  S3 State Buckets (Per Environment)                           │   │  │
+│  │  │  • microservices-terraform-state-bucket-dev                   │   │  │
+│  │  │  • microservices-terraform-state-bucket-uat                   │   │  │
+│  │  │  • microservices-terraform-state-bucket-prod                  │   │  │
+│  │  │  Features: Versioning, Encryption, Lifecycle (90 days)        │   │  │
+│  │  └──────────────────────────────────────────────────────────────┘   │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐   │  │
+│  │  │  DynamoDB Lock Tables (Per Environment)                       │   │  │
+│  │  │  • microservices-terraform-state-lock-dev                     │   │  │
+│  │  │  • microservices-terraform-state-lock-uat                     │   │  │
+│  │  │  • microservices-terraform-state-lock-prod                    │   │  │
+│  │  │  Purpose: Prevent concurrent state modifications              │   │  │
+│  │  └──────────────────────────────────────────────────────────────┘   │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+│  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │                        AWS SECRETS MANAGER                            │  │
 │  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  │  │
 │  │  │ github-actions/  │  │ github-actions/  │  │ github-actions/  │  │  │
-│  │  │ dev/aws-creds    │  │ uat/aws-creds    │  │ prod/aws-creds   │  │  │
+│  │  │ dev/aws-         │  │ uat/aws-         │  │ prod/aws-        │  │  │
+│  │  │ credentials      │  │ credentials      │  │ credentials      │  │  │
 │  │  └──────────────────┘  └──────────────────┘  └──────────────────┘  │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                               │
@@ -164,88 +199,134 @@
 
 ## 🔄 Complete Deployment Flow
 
-### Step 1: Infrastructure Setup (One-time per environment)
+### Step 0: Backend Setup (One-time per environment)
+
+```
+Developer → Run backend-setup.sh
+                    │
+                    ▼
+            AWS Credentials
+                    │
+                    ▼
+            Terraform Apply
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+S3 State Bucket          DynamoDB Lock Table
+(per environment)        (per environment)
+        │                       │
+        ├─ *-state-bucket-dev   ├─ *-state-lock-dev
+        ├─ *-state-bucket-uat   ├─ *-state-lock-uat
+        └─ *-state-bucket-prod  └─ *-state-lock-prod
+```
+
+### Step 1: Infrastructure Setup (Per environment)
 
 ```
 Developer → GitHub Actions → Terraform Deploy
-                                    │
-                                    ▼
-                            AWS Secrets Manager
-                                    │
-                                    ▼
-                            Terraform Apply
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-                   VPC             EKS             ECR
+                                     │
+                                     ▼
+                         AWS Bootstrap Role (OIDC)
+                                     │
+                                     ▼
+                         AWS Secrets Manager
+                                     │
+                                     ▼
+                    Environment-Specific Credentials
+                                     │
+                                     ▼
+                    Terraform Init -backend-config=backend-{env}.hcl
+                                     │
+                                     ▼
+                    State loaded from S3 bucket (env-specific)
+                                     │
+                                     ▼
+                             Terraform Apply
+                                     │
+                     ┌───────────────┼───────────────┐
+                     ▼               ▼               ▼
+                    VPC             EKS             ECR
 ```
 
 ### Step 2: Application Build & Push
 
 ```
 Developer → GitHub Actions → Docker Build
-                                    │
-                                    ▼
-                            AWS Secrets Manager
-                                    │
-                                    ▼
-                            ECR Login
-                                    │
-                                    ▼
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            Build Patient    Build Application  Build Order
-              Service           Service          Service
-                    │               │               │
-                    └───────────────┼───────────────┘
-                                    ▼
-                            Push to ECR
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            patient-service  application-service  order-service
-            :latest          :latest              :latest
-            :abc1234         :abc1234             :abc1234
-            :dev-timestamp   :dev-timestamp       :dev-timestamp
+                                     │
+                                     ▼
+                         AWS Bootstrap Role (OIDC)
+                                     │
+                                     ▼
+                         AWS Secrets Manager
+                                     │
+                                     ▼
+                    Environment-Specific Credentials
+                                     │
+                                     ▼
+                             ECR Login
+                                     │
+                                     ▼
+                     ┌───────────────┼───────────────┐
+                     ▼               ▼               ▼
+             Build Patient    Build Application  Build Order
+               Service           Service          Service
+              (parallel)        (parallel)       (parallel)
+                     │               │               │
+                     └───────────────┼───────────────┘
+                                     ▼
+                             Push to ECR
+                                     │
+                     ┌───────────────┼───────────────┐
+                     ▼               ▼               ▼
+             patient-service  application-service  order-service
+             :git-tag         :git-tag             :git-tag
+             :sha             :sha                 :sha
+             :env-timestamp   :env-timestamp       :env-timestamp
 ```
 
 ### Step 3: Kubernetes Deployment
 
 ```
 Developer → GitHub Actions → K8s Deploy
-                                    │
-                                    ▼
-                            AWS Secrets Manager
-                                    │
-                                    ▼
-                            Configure kubectl
-                                    │
-                                    ▼
-                            Read images.yaml
-                                    │
-                                    ▼
-                    Process K8s Manifests
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            Deploy Patient    Deploy Application  Deploy Order
-              Service           Service          Service
-                    │               │               │
-                    └───────────────┼───────────────┘
-                                    ▼
-                            Deploy Ingress
-                                    │
-                                    ▼
-                            EKS Cluster
-                                    │
-                    ┌───────────────┼───────────────┐
-                    ▼               ▼               ▼
-            Pods Pull from ECR (using IAM role)
-                    │               │               │
-                    ▼               ▼               ▼
-            patient-service  application-service  order-service
-            containers       containers           containers
-            running          running              running
+                                     │
+                                     ▼
+                         AWS Bootstrap Role (OIDC)
+                                     │
+                                     ▼
+                         AWS Secrets Manager
+                                     │
+                                     ▼
+                    Environment-Specific Credentials
+                                     │
+                                     ▼
+                             Configure kubectl
+                                     │
+                                     ▼
+                             Read images.yaml
+                                     │
+                                     ▼
+                     Process K8s Manifests
+                                     │
+                     ┌───────────────┼───────────────┐
+                     ▼               ▼               ▼
+             Deploy Patient    Deploy Application  Deploy Order
+               Service           Service          Service
+                     │               │               │
+                     └───────────────┼───────────────┘
+                                     ▼
+                             Deploy Ingress
+                                     │
+                                     ▼
+                             EKS Cluster
+                                     │
+                     ┌───────────────┼───────────────┐
+                     ▼               ▼               ▼
+             Pods Pull from ECR (using IAM role)
+                     │               │               │
+                     ▼               ▼               ▼
+             patient-service  application-service  order-service
+             containers       containers           containers
+             running          running              running
 ```
 
 ## 🔐 Security Flow
@@ -256,12 +337,17 @@ Developer → GitHub Actions → K8s Deploy
 │                          │                                   │
 │                          ▼                                   │
 │              AWS Bootstrap Role (OIDC)                       │
+│              (secrets.AWS_BOOTSTRAP_ROLE_ARN)                │
 │                          │                                   │
 │                          ▼                                   │
 │              AWS Secrets Manager                             │
 │                          │                                   │
 │                          ▼                                   │
+│       Retrieve: github-actions/{env}/aws-credentials         │
+│                          │                                   │
+│                          ▼                                   │
 │              Environment-Specific Credentials                │
+│              (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)      │
 │                          │                                   │
 │          ┌───────────────┼───────────────┐                  │
 │          ▼               ▼               ▼                  │
@@ -294,14 +380,62 @@ Kubernetes Ingress
 ## 🎯 Environment Isolation
 
 ```
-┌──────────────┬──────────────┬──────────────┐
-│     DEV      │     UAT      │     PROD     │
-├──────────────┼──────────────┼──────────────┤
-│ VPC (dev)    │ VPC (uat)    │ VPC (prod)   │
-│ EKS (dev)    │ EKS (uat)    │ EKS (prod)   │
-│ ECR (dev)    │ ECR (uat)    │ ECR (prod)   │
-│ Secrets(dev) │ Secrets(uat) │ Secrets(prod)│
-└──────────────┴──────────────┴──────────────┘
+┌──────────────────┬──────────────────┬──────────────────┐
+│       DEV        │       UAT        │       PROD       │
+├──────────────────┼──────────────────┼──────────────────┤
+│ State Bucket:    │ State Bucket:    │ State Bucket:    │
+│ *-state-*-dev    │ *-state-*-uat    │ *-state-*-prod   │
+│                  │                  │                  │
+│ Lock Table:      │ Lock Table:      │ Lock Table:      │
+│ *-state-lock-dev │ *-state-lock-uat │ *-state-lock-prod│
+│                  │                  │                  │
+│ VPC (dev)        │ VPC (uat)        │ VPC (prod)       │
+│ EKS (dev)        │ EKS (uat)        │ EKS (prod)       │
+│ ECR (dev)        │ ECR (uat)        │ ECR (prod)       │
+│ Secrets(dev)     │ Secrets(uat)     │ Secrets(prod)    │
+│                  │                  │                  │
+│ Backend Config:  │ Backend Config:  │ Backend Config:  │
+│ backend-dev.hcl  │ backend-uat.hcl  │ backend-prod.hcl │
+└──────────────────┴──────────────────┴──────────────────┘
 ```
 
-This architecture provides complete isolation between environments with manual control over all deployments!
+## 🔄 Terraform State Management Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Terraform Command Execution                                 │
+│                                                               │
+│  terraform init -backend-config=backend-{env}.hcl            │
+│                          │                                   │
+│                          ▼                                   │
+│              Read backend-{env}.hcl                          │
+│              (bucket name for environment)                   │
+│                          │                                   │
+│                          ▼                                   │
+│       Connect to S3: microservices-terraform-state-bucket-{env}│
+│                          │                                   │
+│                          ▼                                   │
+│       Acquire lock in DynamoDB: microservices-terraform-state-lock-{env}│
+│                          │                                   │
+│                          ▼                                   │
+│       Load state from S3: microservices/terraform.tfstate    │
+│                          │                                   │
+│                          ▼                                   │
+│              Execute Terraform Operations                    │
+│                          │                                   │
+│                          ▼                                   │
+│       Save state to S3 (versioned, encrypted)                │
+│                          │                                   │
+│                          ▼                                   │
+│              Release DynamoDB lock                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+This architecture provides:
+- ✅ Complete environment isolation with separate state buckets and lock tables
+- ✅ Secure credential management via OIDC and Secrets Manager
+- ✅ Environment-specific state locking to prevent concurrent modifications
+- ✅ Versioned and encrypted state files
+- ✅ Manual control over all deployments
+- ✅ Parallel Docker builds for efficiency
+- ✅ Automated PR validation with Terraform plan
